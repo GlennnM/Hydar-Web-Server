@@ -1,1 +1,0 @@
-gcc -shared -O3 cstuff.c -o cstuff.dll
