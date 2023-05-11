@@ -10,6 +10,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.PrintStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -45,14 +46,11 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.UnaryOperator;
-import java.util.logging.ConsoleHandler;
-import java.util.logging.Logger;
 import java.util.zip.DeflaterOutputStream;
 import java.util.zip.GZIPOutputStream;
 
@@ -319,7 +317,7 @@ class ServerThread implements Runnable {
 			path =splitUrl[0];
 			search = splitUrl[1];
 		}
-		Hydar.println(""+client_addr+"> " + method + " " + path + " " + version+"\n");
+		Hydar.println(""+client_addr+"> " + method + " " + path + " " + version);
 		
 		//Verify authority.
 		if((host==null ||(!Config.HOST.map(x->x.matcher(host).matches()).orElse(true)))) {
@@ -921,7 +919,6 @@ class Response{
 			return;
 		
 		if(hs.isEmpty()) {
-			Hydar.println("............< "+toString());
 			String fl = version+" "+responseStatus+" "+getInfo();
 			BAOS baos = new BAOS(256);
 			baos.write(fl.getBytes(ISO_8859_1));
@@ -970,6 +967,7 @@ class Response{
 				lock.unlock();
 			}
 		}
+		Hydar.println("............< "+toString());
 	}
 	/**HTTP info.*/
 	public String getInfo() {
@@ -1103,7 +1101,7 @@ class Response{
 	/**For debugging*/
 	@Override
 	public String toString() {
-		return version+" "+responseStatus+"("+getInfo()+")"+((length!=0&&sendData)?(": "+length+(sendLength?"":"*")+" bytes\n"):"\n");
+		return version+" "+responseStatus+"("+getInfo()+")"+((length!=0&&sendData)?(": "+length+(sendLength?"":"*")+" bytes"):"");
 	}
 
 }
@@ -1351,9 +1349,6 @@ public class Hydar {
 	
 	//Maps file names to resources. These do not start with /
 	public static Map<String,Resource> resources = new ConcurrentHashMap<>();
-	//STDOUT thread
-	private static final ExecutorService stdout = Executors.newSingleThreadExecutor(HydarUtil.TFAC);
-	
 	
 	
 	//Used for TURN authentication.
@@ -1361,9 +1356,10 @@ public class Hydar {
 	public static String authenticate(String user){
 		return HydarEE.HttpSession.tcAuth(user);
 	}
-	/**Simple non-blocking print(will eventually be replaced by logging)*/
+	/**Simple non-blocking print(will eventually be replaced by logging) - also was replaced by buffered stream*/
 	static void println(Object s) {
-		stdout.submit(()->System.out.println(s));
+		System.out.println(s);
+		//stdout.submit(()->{System.out.println(s);return null;});
 	}
 	/**
 	 * Check a socket against the associated Limiter.
@@ -1496,11 +1492,7 @@ public class Hydar {
 	 * */
 	public static void main(String[] args) throws IOException, NamingException, InterruptedException{
 		//System.setProperty("java.class.path")
-		var log=Logger.getGlobal();
-		log.addHandler(new ConsoleHandler());
-		log.fine("hydar");
-		
-		//System.setOut(new PrintStream(new BufferedOutputStream(System.out, 1024)));
+		System.setOut(new PrintStream(new BufferedOutputStream(System.out, 1024)));
 		String configPath=args.length>0?String.join(" ",args):"./hydar.properties";
 		Config.load(configPath);
 		final ExecutorService ee;
@@ -1658,6 +1650,7 @@ public class Hydar {
 				e.printStackTrace();
 				Thread.sleep(5000);
 			}
+			System.out.flush();
 		}
 	}
 
