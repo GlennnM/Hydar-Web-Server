@@ -22,6 +22,7 @@ public class HydarH2{
 	/**TODO: server push - load deps based on rates, store in cookie(2 b64/etag?)*/
 	public static final byte[] MAGIC="PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".getBytes(ISO_8859_1);
 	public final ServerThread thread;
+	public final Config config;
 	public final Map<Integer,HStream> streams= new HashMap<>();
 	public final HydarHP compressor;
 	public final HydarHP decompressor;
@@ -39,16 +40,8 @@ public class HydarH2{
 		16384,//SETTINGS_MAX_FRAME_SIZE
 		8192//SETTINGS_MAX_HEADER_LIST_SIZE
 	};
-	public int[] localSettings = {
-		0,//unused
-		Config.H2_HEADER_TABLE_SIZE,//SETTINGS_HEADER_TABLE_SIZE 
-		0,//SETTINGS_ENABLE_PUSH
-		Config.H2_MAX_CONCURRENT_STREAMS,//SETTINGS_MAX_CONCURRENT_STREAMS 
-		65535,//SETTINGS_INITIAL_WINDOW_SIZE
-		Config.H2_MAX_FRAME_SIZE,//SETTINGS_MAX_FRAME_SIZE
-		Config.H2_MAX_HEADER_LIST_SIZE//SETTINGS_MAX_HEADER_LIST_SIZE
-	};
-	public volatile int localWindow = localSettings[Setting.SETTINGS_INITIAL_WINDOW_SIZE];
+	public int[] localSettings;
+	public volatile int localWindow;
 	//longadder might be better but this saves memory
 	public final AtomicInteger remoteWindow = new AtomicInteger(remoteSettings[Setting.SETTINGS_INITIAL_WINDOW_SIZE]);
 	volatile ByteBuffer input=ByteBuffer.allocate(0);
@@ -56,6 +49,17 @@ public class HydarH2{
 	public static final Frame SETTINGS_ACK=Frame.of(Frame.SETTINGS).ackFlag();
 	public HydarH2(ServerThread thread) throws IOException {
 		this.thread=thread;
+		this.config=thread.config;
+		localSettings=new int[]{
+			0,//unused
+			Config.H2_HEADER_TABLE_SIZE,//SETTINGS_HEADER_TABLE_SIZE 
+			0,//SETTINGS_ENABLE_PUSH
+			Config.H2_MAX_CONCURRENT_STREAMS,//SETTINGS_MAX_CONCURRENT_STREAMS 
+			65535,//SETTINGS_INITIAL_WINDOW_SIZE
+			Config.H2_MAX_FRAME_SIZE,//SETTINGS_MAX_FRAME_SIZE
+			Config.H2_MAX_HEADER_LIST_SIZE//SETTINGS_MAX_HEADER_LIST_SIZE
+		};
+		localWindow= localSettings[Setting.SETTINGS_INITIAL_WINDOW_SIZE];
 		compressor = new HydarHP.Compressor(localSettings[Setting.SETTINGS_HEADER_TABLE_SIZE]);
 		decompressor = new HydarHP.Decompressor(remoteSettings[Setting.SETTINGS_HEADER_TABLE_SIZE]);
 		thread.client.setSoTimeout(Config.H2_LIFETIME);
