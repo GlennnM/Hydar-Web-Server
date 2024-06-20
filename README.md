@@ -9,5 +9,5 @@ This package also includes custom <b>JDBC connection and statement pooling</b>, 
 <br><br>
 
 <h1>Building</h1>
-Clone the repository and run compile_hydar.bat or compile_hydar.sh(JDK 17+ required). This will launch the example server on port 8080, and you can view its source in /src/webapp/, or configure it in hydar.properties. More documentation might be available eventually.<br>
+Clone the repository and run compile_hydar.bat or compile_hydar.sh(JDK 17+ required). This will launch the example server on port 8080, and you can view its source in /src/webapp/, or configure it in hydar.properties.<br>The command line arguments supplied are paths to "hydar.properties" files, each of which will launch a servlet. Servlets are separated by the Hydar.HOST and Hydar.SERVLET_PATH properties in the file, and the files hosted are determined by the Hydar.WEB_ROOT property. The web root path is relative to the hydar.properties file for that servlet.<br> More documentation might be available eventually.<br>
 There are no dependencies.<br>
