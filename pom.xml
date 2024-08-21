@@ -14,10 +14,6 @@
 				<excludes>
 					<exclude>**/*.java</exclude>
 				</excludes>
-				<directory>src/webapp</directory>
-				<excludes>
-					<exclude>**/**</exclude>
-				</excludes>
 			</resource>
 		</resources>
 		<plugins>
