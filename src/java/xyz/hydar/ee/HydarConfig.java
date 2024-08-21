@@ -50,7 +50,8 @@ class Config{
 	public int CACHE_MAX=1024000;
 	public Optional<Pattern> HOST=Optional.empty();//empty=anything allowed
 	public Optional<Pattern> FORBIDDEN_REGEX=Optional.empty();//empty=anything allowed
-	public Optional<Pattern> CACHE_REGEX=Optional.of(Pattern.compile(".*"));//empty=anything allowed 
+	public Optional<Pattern> CACHE_OFF_REGEX=Optional.empty();//empty=anything allowed 
+	public Optional<Pattern> CACHE_ON_REGEX=Optional.of(Pattern.compile(".*"));//empty=anything allowed 
 	public boolean CACHE_ENABLED=true;
 	public List<String> ZIP_ALGS=List.of("gzip","deflate");
 	public Set<String> ZIP_MIMES = Set.of("text/html", "text/css", "text/plain", "text/xml", "text/x-component",
@@ -67,12 +68,15 @@ class Config{
 	public boolean PERSIST_SESSIONS=true;
 	
 	public static boolean H2_ENABLED=true;
-	public static int H2_WINDOW_ATTEMPTS=8;
-	public static int H2_WINDOW_TIMER=1000;
+	public static int H2_WINDOW_ATTEMPTS=3;
+	public static int H2_LOCAL_WINDOW_TIMER=0;
+	public static int H2_REMOTE_WINDOW_TIMER=1000;
+	public static int H2_LOCAL_WINDOW_INC=10_240_000;
 	public static int H2_HEADER_TABLE_SIZE=4096;
 	public static int H2_MAX_CONCURRENT_STREAMS=256;
 	public static int H2_MAX_FRAME_SIZE=16384;
 	public static int H2_MAX_HEADER_LIST_SIZE=8192;
+	
 	
 	public static int HTTP_LIFETIME=5000;
 	
@@ -105,7 +109,7 @@ class Config{
 	public static int TC_FAST_H2_FRAME=5;
 	public static int TC_PERMANENT_THREAD=100;
 	public static int TC_PERMANENT_H2_STREAM=10;
-	public static int TC_MAX_BUFFER=1024 * 1024;
+	public static int TC_MAX_BUFFER=10 * 1024 * 1024;
 	public static int TC_SLOW_JSP_INVOKE=100;
 	public static Set<String> alreadySet = new HashSet<>();
 	public String configPath = "";
@@ -324,7 +328,7 @@ class Config{
 				try {
 					field.get(null);
 					if(!alreadySet.add(k)) {
-						System.out.println("Repeat global setting "+k+". This setting is global and can only be changed once. Please ensure it only occurs in one properties files.");
+						System.out.println("Repeat global setting "+k+". This setting is global and can only be changed once. Please ensure it only occurs in one properties file.");
 						return;
 					}
 				}catch(NullPointerException e) {
@@ -421,7 +425,6 @@ class Config{
 	}
 	/**Return an appopriate error page, backed by HydarConfig.*/
 	public String getErrorPage(String code) {
-		//TODO:429 is almost never sent
 		return errorPages.getOrDefault(code,errorPages.get("default"));
 	}
 }

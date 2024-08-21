@@ -18,8 +18,10 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
+import java.net.URLDecoder;
 import java.net.http.HttpTimeoutException;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardWatchEventKinds;
@@ -64,8 +66,12 @@ import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLServerSocketFactory;
+import javax.net.ssl.SSLSocket;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
+
+import xyz.hydar.ee.HydarEE.HttpServletRequest;
+import xyz.hydar.ee.HydarEE.HttpServletResponse;
 
 
 /**
@@ -88,7 +94,7 @@ class ServerThread implements Runnable {
 	public final BufferedDIS input;//See HydarUtil
 	
 	//If false we end the thread on the next read or timeout.
-	public volatile boolean alive;
+	private volatile boolean alive;
 	
 	//Controls rate limiting - specified in HydarUtil, implemented in HydarLimiter
 	public final Limiter limiter;
@@ -96,12 +102,11 @@ class ServerThread implements Runnable {
 	//If the client has already successfully sent a request,
 	//set this field so we don't 408 them on SocketTimeoutExceptions.
 	private boolean h1use=false;
-	
+	private boolean willClose=false;//Connection: close header
 	//Session obtained from cookies or URL.
 	public volatile HydarEE.HttpSession session=null;
 	
-	//FIXME:still not threadsafe, might change before response finishes writing
-	private boolean isHead=false;//INCOMING hstream
+	private volatile boolean isHead=false;//INCOMING hstream
 	public volatile Hydar hydar;
 	public volatile Config config=Hydar.hydars.get(0).config;
 	/**
@@ -130,7 +135,7 @@ class ServerThread implements Runnable {
 	public void run() {
 		try(client) {
 			this.alive=true;
-			while(this.alive){
+			while(this.alive() && !willClose){
 				//update last used time for session
 				try {
 					if(h2!=null)
@@ -150,7 +155,7 @@ class ServerThread implements Runnable {
 		} catch (IOException e) {
 			
 		}finally {
-			this.alive=false;
+			close();
 			//Return tokens to the limiter.
 			limiter.release(Token.PERMANENT_STATE,Config.TC_PERMANENT_THREAD);
 			Hydar.threadCount.decrementAndGet();
@@ -191,6 +196,7 @@ class ServerThread implements Runnable {
 			
 			headers.put(":method",firstLine[0]);
 			headers.put(":path",firstLine[1]);
+			headers.put(":scheme",client instanceof SSLSocket?"https":"http");
 			
 			byte[] body = new byte[0];
 			int bodyLength=0;
@@ -335,20 +341,22 @@ class ServerThread implements Runnable {
 		if (path.equals("/")) {
 			path = config.HOMEPAGE;
 		}
-		path = config.LOWERCASE_URLS?path.toLowerCase():path;
 
+		for(var s:config.links.entrySet()){
+			path=path.replaceAll(s.getKey(),s.getValue());
+		}
 		String search = "";
 		String[] splitUrl=path.split("\\?",2);
 		if(splitUrl.length==2){
 			path =splitUrl[0];
 			search = splitUrl[1];
 		}
+		
+		path = config.LOWERCASE_URLS?path.toLowerCase():path;
+		path = URLDecoder.decode(path,StandardCharsets.UTF_8);
 		System.out.println(""+client_addr+"> " + method + " " + path + " " + version);
 		//Virtual links(see default.properties).
 		//These are useful for turning path params into request params.
-		for(var s:config.links.entrySet()){
-			path=path.replaceAll(s.getKey(),s.getValue());
-		}
 		//Reject multipart. TODO: support it.
 		if(method.equals("POST")) {
 			String ct=headers.get("content-type");
@@ -388,32 +396,14 @@ class ServerThread implements Runnable {
 		if(h2 == null && connection!=null){
 			connection=connection.toLowerCase();
 			if(connection.contains("close"))
-				this.alive=false;
+				willClose=true;
 			if(connection.contains("upgrade")) {
 				upgrade=true;
 				protocol = headers.get("upgrade");
 			}
 		}
 		
-		/**
-		Set cookies, and set sessionID if found.
-		*/
-		String sessionID=null;
-		Map<String,String> cookies=new HashMap<>();
-		String cookieStr=headers.get("cookie");
-		if(cookieStr!=null){
-			for(String inc:cookieStr.split(";")){
-				String[] x = inc.split("=",2);
-				if(x.length==2){
-					String name = x[0].trim();
-					String value = x[1].trim();
-					if(name.equals("HYDAR_sessionID") && (sessionID==null || hydar.ee.get(client_addr,sessionID)==null)){
-						sessionID=value;
-					}
-					cookies.put(name,value);
-				}
-			}
-		}
+		
 		/**
 		 * Handle protocol upgrades.
 		 * (h2c, WS)
@@ -439,7 +429,7 @@ class ServerThread implements Runnable {
 						//maybe: add server max bits etc
 					}
 				}
-				this.wsInit(wsKey,wsDeflate,sessionID,path,search);
+				this.wsInit(wsKey,wsDeflate,headers,path,search);
 				return;
 			}else {
 				System.out.println("400 by websocket");
@@ -528,7 +518,7 @@ class ServerThread implements Runnable {
 				String range=headers.get("range");
 				if(range!=null&&config.RANGE_NO_JSP&&!resp.parseRange(range)) {
 					getError("416",hstream)
-						.header("Content-Range","*"+"/"+length)
+						.header("Content-Range","bytes */"+length)
 						.write();
 					return;
 				}
@@ -555,20 +545,8 @@ class ServerThread implements Runnable {
 					close();
 					return;
 				}
-				boolean fromCookie=true;
-				String servletName=path.substring(0,path.indexOf(".jsp"));
-				if(hydar.ee.jsp_needsSession(servletName)&&(sessionID==null||(session=hydar.ee.get(client_addr, sessionID))==null)) {
-					fromCookie=false;
-					//FIND IT FROM THE URL
-					String id=request.getParameter("HYDAR_sessionID");
-					if(id==null || (session=hydar.ee.get(client_addr, id))==null)
-						session=hydar.ee.create(client_addr);
-				}
-				final Optional<HStream> fhs=hstream;//copy
-				ret.onReset(()->newResponse(200,fhs));
-				request.withSession(session,fromCookie);
-				request.withAddr((InetSocketAddress)client.getRemoteSocketAddress());
-				ret.withRequest(request);
+				
+				String servletName = this.addSession(request, ret, path, hstream);
 				//run the stored method
 				long invokeTime=System.currentTimeMillis();
 				hydar.ee.jsp_dispatch(servletName,request, ret);
@@ -613,15 +591,20 @@ class ServerThread implements Runnable {
 	}
 	/**Utility to build a response from the current context, with as much information as possible.*/
 	protected Hydar.Response newResponse(String code, Optional<HStream> hs) {
-		var build=hydar.new Response(code).version(h2==null?"HTTP/1.1":"HTTP/2.0").hstream(hs).output(output).limiter(limiter);
-		if(isHead)build.disableLength().disableData();
+		var tmpHydar=hydar==null?Hydar.hydars.get(0):hydar;
+		var build=tmpHydar.new Response(code).version(h2==null?"HTTP/1.1":"HTTP/2.0").hstream(hs).output(output).limiter(limiter);
+		boolean isHead2=hs.map(x->x.isHead(isHead)).orElse(isHead);
+		if(isHead2) {//prioritize h2 if present
+			build.disableData();
+		}
 		return build;
 	}
 	
 	/**Build an error response from Response::getErrorPage, which loads from HydarConfig.*/
 	protected Hydar.Response getError(String code, Optional<HStream> hs) {
 		String error=config.getErrorPage(code);
-		var builder = !isHead?newResponse(code,hs).data(error.getBytes()):newResponse(code,hs);
+		boolean isHead2=hs.map(x->x.isHead(isHead)).orElse(isHead);
+		var builder = !isHead2?newResponse(code,hs).data(error.getBytes()):newResponse(code,hs);
 		return builder;
 	}
 	/**Build and immediately send an error. Convenience method.*/
@@ -631,6 +614,46 @@ class ServerThread implements Runnable {
 	/**Build an upgrade reponse(convenience). HTTP/1.1 only.*/
 	private final Hydar.Response UPGRADE(String protocol) {
 		return newResponse("101",Optional.empty()).version("HTTP/1.1").header("Upgrade",protocol).output(output).header("Connection","Upgrade");
+	}
+	/**
+	 * Load a session from the HTTPServletRequest request to the response 'ret', and set this.session as well.
+	 * 
+	 * */
+	public String addSession(HttpServletRequest request, HttpServletResponse ret, String path, Optional<HStream> hstream) {
+		/** 
+		Set sessionID to cookie if found.
+		*/
+		String sessionID=null;
+		String cookieStr=request.getHeader("cookie");
+		if(cookieStr!=null){
+			for(String inc:cookieStr.split(";")){
+				String[] x = inc.split("=",2);
+				if(x.length==2){
+					String name = x[0].trim();
+					String value = x[1].trim();
+					if(name.equals("HYDAR_sessionID") && (sessionID==null || hydar.ee.get(client_addr,sessionID)==null)){
+						sessionID=value;
+					}
+				}
+			}
+		}
+		
+		boolean fromCookie=true;
+		String servletName=path.substring(0,path.indexOf(".jsp"));
+		if(hydar.ee.jsp_needsSession(servletName)&&(sessionID==null||(session=hydar.ee.get(client_addr, sessionID))==null)) {
+			fromCookie=false;
+			//FIND IT FROM THE URL
+			String id=request.getParameter("HYDAR_sessionID");
+			if(id==null || (session=hydar.ee.get(client_addr, id))==null) {
+				session=hydar.ee.create(client_addr);
+			}
+		}
+		final Optional<HStream> fhs=hstream;//copy
+		ret.onReset(()->newResponse(200,fhs));
+		request.withSession(session,fromCookie);
+		request.withAddr((InetSocketAddress)client.getRemoteSocketAddress());
+		ret.withRequest(request);
+		return servletName;
 	}
 	/**H2C handshake. Rarely used, since H2 over TLS will use ALPN.*/
 	public HStream h2cInit(Map<String,String> headers) throws IOException{
@@ -658,20 +681,15 @@ class ServerThread implements Runnable {
 		return hs;
 	}
 	/**WebSocket handshake. HTTP/1.1 only(for now).*/
-	public void wsInit(String wsKey,boolean wsDeflate,String sessionID,String url, String search) throws IOException{
+	public void wsInit(String wsKey,boolean wsDeflate,Map<String,String> headers, String url, String search) throws IOException{
+		
+		HttpServletRequest request = new HttpServletRequest(headers, new byte[0], search);
 		wsKey+="258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 		MessageDigest md;
 		try {
 			md = MessageDigest.getInstance("SHA-1");
 		}catch(NoSuchAlgorithmException e) {throw new RuntimeException(e);}
 		
-		//Websockets require sessions, since endpoint responses are dynamic.
-		if(sessionID==null ||(session=hydar.ee.get(client_addr, sessionID))==null) {
-			//FIND IT FROM THE URL
-			String id=new HydarEE.HttpServletRequest("",search).getParameter("HYDAR_sessionID");
-			if(id==null || (session=hydar.ee.get(client_addr, id))==null)
-				session=hydar.ee.create(client_addr);
-		}
 		md.update(wsKey.getBytes(ISO_8859_1));
 		byte[] digest = md.digest();
 		wsKey= Base64.getEncoder().encodeToString(digest);
@@ -681,20 +699,31 @@ class ServerThread implements Runnable {
 			ext="permessage-deflate";
 		}
 		Hydar.Response resp = UPGRADE("websocket")
-			.header("Sec-WebSocket-Accept",wsKey)
-			.disableLength();
+				.header("Sec-WebSocket-Accept",wsKey)
+				.disableLength();
 		if(ext!=null)
 			resp.header("Sec-WebSocket-Extensions",ext);
-		resp.write();
+		HttpServletResponse ret = new HttpServletResponse(resp,0);
+		//Websockets require sessions, since endpoint responses are dynamic.
+		addSession(request, ret, url, Optional.empty());
+		
+		var rr=ret.toHTTP();
+		rr.write();
+		
 		//Create the context.
 		ws=new HydarWS(this,url,search,wsDeflate);
 		
 		
 	}
+	/**Public getter for status checks*/
+	public boolean alive() {
+		return alive;
+	}
 	/**Close immediately. Called by HydarWS::close and HydarH2::goaway.*/
 	public void close() {
-		alive=false;
-		try(client){}
+		this.alive=false;
+		try(client;HydarWS ws = this.ws;){
+		}
 		catch(IOException ioe) {}
 	}
 	
@@ -796,7 +825,10 @@ class Resource{
 		
 		//Cache the file in memory along with its compressed versions, if it's small enough.
 		if(size > config.CACHE_MAX || !config.CACHE_ENABLED ||
-				!(config.CACHE_REGEX
+				!(config.CACHE_ON_REGEX
+						.filter(x->x.matcher(p.toString()).find())
+						.isPresent())
+				|| (config.CACHE_OFF_REGEX
 						.filter(x->x.matcher(p.toString()).find())
 						.isPresent())){
 			path=true;
@@ -855,11 +887,6 @@ class Resource{
 		streamPaths.put(enc,newPath);
 		return Files.size(newPath);
 	}
-	/**
-	 * Respond to a file event.
-	 * Usually reloads or removes the file.
-	 * 'kind' may be null if polling is being used.
-	 * */
 	
 }
 
@@ -1028,6 +1055,7 @@ public class Hydar {
 						public void hparse(Map<String,String> headers, Optional<HStream> hstream, byte[] body, int bodyLength) throws IOException {
 							String path = headers.get(":path");
 							String host = hstream.isPresent() ? headers.get(":authority") : headers.get("host");
+							this.hydar=hydars.get(0);
 							if(host==null) {
 								sendError("400",hstream);
 								close();
@@ -1162,7 +1190,11 @@ public class Hydar {
 			}
 		}
 	}
-	/**Replace a resource.*/
+	/**
+	 * Respond to a file event.
+	 * Usually reloads or removes the file.
+	 * 'kind' may be null if polling is being used.
+	 * */
 	public Resource updateResource(Path p, Path parent, Path root, WatchEvent.Kind<?> kind, long now){
 		//check times to decide whether to replace
 		if(kind!=null) {
@@ -1170,11 +1202,10 @@ public class Hydar {
 		}
 		Path q =p.normalize();
 		String e_=root.relativize(q).toString().replace("\\","/");
-		if(config.LOWERCASE_URLS)
-			e_=e_.toLowerCase();
-		String e=e_;
+		String e = config.LOWERCASE_URLS?e_.toLowerCase():e_;
 		Resource r=null;
 		long fmodif=0;
+		//System.out.println(p+" "+kind);
 		try {
 			if(kind==null) {
 				//using polling
@@ -1184,29 +1215,32 @@ public class Hydar {
 				return null;
 			}else if(config.FORBIDDEN_REGEX.map(x->x.matcher(e+"/").find()).orElse(false)){
 				return null;
-			}else if(Files.isDirectory(p) && kind != StandardWatchEventKinds.ENTRY_DELETE){
-				if(!KEYS.containsKey(p)&& HydarUtil.addKey(this,p,root)) {
+				//problem: wasdirectory not isdirectory
+			}else if(Files.isDirectory(q) && kind != StandardWatchEventKinds.ENTRY_DELETE){
+				if(!KEYS.containsKey(q)&& HydarUtil.addKey(this,q,root)) {
 					System.out.println("Created folder listener on "+e);
+					Files.walk(q).sorted().forEach(path->updateResource(path.getFileName(),path.getParent(),dir,kind,now));
 				}
 				return null;
-			}else if(kind == StandardWatchEventKinds.ENTRY_DELETE) {
-				if(KEYS.remove(p)==null) {
+				//modify on folder is considered delete
+			}else if(KEYS.containsKey(q) || kind == StandardWatchEventKinds.ENTRY_DELETE) {
+				if(KEYS.remove(q)==null) {
 					resources.remove(e);
 					ee.servlets.remove(e+".jsp");
-					
 				}else {
 					System.out.println("Removed folder listener on "+e);
-					if(KEYS.keySet().removeIf(t->t.startsWith(e+"/"))) {
-						System.out.println("Subdirectory listeners removed");
-					}
 				}
-				resources.keySet().removeIf(x->Path.of(x).startsWith(e+"/"));
-				ee.servlets.keySet().removeIf(x->Path.of(x).startsWith(e+"/"));
+				//dont ignore case
+				if(KEYS.keySet().removeIf(t->t.startsWith(q))) {
+					System.out.println("Subdirectory listeners removed");
+				}
+				resources.keySet().removeIf(x->Path.of(x).startsWith(e));
+				ee.servlets.keySet().removeIf(x->Path.of(x).startsWith(e));
 				System.out.println("File "+e+" was removed from the server directory.");
 				return null;
 			}
 			if((!config.USE_WATCH_SERVICE||config.LASTMODIFIED_FROM_FILE)) {
-				fmodif = Files.getLastModifiedTime(p).toMillis();
+				fmodif = Files.getLastModifiedTime(q).toMillis();
 				if((r=resources.get(e))!=null) {
 					long delta=fmodif-r.fmodif.toEpochMilli();
 					if(delta==0)
@@ -1301,10 +1335,10 @@ public class Hydar {
 			}
 			//server loop
 			while (alive) {
-				for(Hydar hydar: hydars) {
-					hydar.updateOnTimer();
-				}
 				try{
+					for(Hydar hydar: hydars) {
+						hydar.updateOnTimer();
+					}
 					Socket client = server.accept();
 					if(!verifySocket(client))continue;
 					ServerThread connection = new ServerThread(client);
@@ -1358,6 +1392,9 @@ public class Hydar {
 		public Response(String status){
 			this();
 			status(status);
+		}
+		public String getStatus() {
+			return responseStatus;
 		}
 		/**builder*/
 		public Response limiter(Limiter limiter) {
@@ -1545,7 +1582,7 @@ public class Hydar {
 				return true;
 			}
 			status(206);
-			header("Content-Range",""+realStart+"-"+realEnd+"/"+realLength);
+			header("Content-Range","bytes "+realStart+"-"+realEnd+"/"+realLength);
 			return true;
 			
 		}
@@ -1594,7 +1631,8 @@ public class Hydar {
 					baos.write(CRLF);
 				}
 				baos.write(CRLF);
-				limiter.force(Token.OUT,baos.size());
+				if(limiter!=null)
+					limiter.force(Token.OUT,baos.size());
 				baos.writeTo(o);
 			}else{
 				//WRITE TO H
@@ -1717,7 +1755,7 @@ public class Hydar {
 						}
 						tmp.writeTo(output,endStream);
 						offset+=flength;
-					}while(thread.alive && offset<originalSize && h.canSend());
+					}while(thread.alive() && offset<originalSize && h.canSend());
 				}
 			}
 					//h.thread.alive=false;

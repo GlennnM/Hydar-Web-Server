@@ -108,7 +108,7 @@ public class HydarEE{
 		config=hydar.config;
 		ctx = new Context(hydar);
 		ctx.init = Map.copyOf(config.macros);
-		Path sessionsPath = Path.of(config.configPath).resolveSibling("sessions.bin");
+		Path sessionsPath = Path.of(config.configPath+".sessions.bin");
 		try {
 			if(config.PERSIST_SESSIONS) {
 				Runtime.getRuntime().addShutdownHook(new Thread(this::persistSessions));
@@ -134,7 +134,7 @@ public class HydarEE{
 	public void persistSessions() {
 		if(persisted || !config.PERSIST_SESSIONS)
 			return;
-		Path sessionsPath = Path.of(config.configPath).resolveSibling("sessions.bin");
+		Path sessionsPath = Path.of(config.configPath+".sessions.bin");;
 		try {
 			var baos = new ByteArrayOutputStream();
 			var oos = new ObjectOutputStream(baos);
@@ -442,8 +442,8 @@ public class HydarEE{
 			}
 			
 			//Final step: load the class, create an instance, and store it so it becomes executable.
-			try{
-				synchronized(compiler) {
+			synchronized(compiler) {
+				try{
 					lastToCompile = this;
 					if(success){
 						//load class and update hash table
@@ -464,11 +464,11 @@ public class HydarEE{
 							System.err.println(e+": Compilation failed. more like cringe compilation LMAO");
 						return -1;
 					}
+				}finally{
+					if(config.COMPILE_IN_MEMORY)
+						ucl.close();
+					lastToCompile=null;
 				}
-			}finally{
-				lastToCompile=null;
-				if(config.COMPILE_IN_MEMORY)
-					ucl.close();
 			}
 		}catch(Exception e){
 			System.out.println("Failed to replace "+p.toString());
@@ -658,8 +658,6 @@ public class HydarEE{
 			if(ct==null||!method.equals("POST")) {}
 			else if(ct.equals("application/x-www-form-urlencoded")) {
 				query+="&"+new String(body,StandardCharsets.ISO_8859_1);
-			}else if(ct.equals("text/plain")) {
-				query+="&"+new String(body,StandardCharsets.ISO_8859_1);
 			}
 			this.query=query;
 			this.body=body;
@@ -710,8 +708,9 @@ public class HydarEE{
 		public boolean isRequestedSessionIdValid() {
 			return session!=null && session.valid;
 		}
+		/**TODO: gives incorrect context on session-excluded JSPs*/
 		public Context getServletContext(){
-			return session ==null ? null : session.hydar.ee.ctx;
+			return session ==null ? Hydar.hydars.get(0).ee.ctx : session.hydar.ee.ctx;
 		}
 		public HttpServletRequest withAddr(InetSocketAddress addr) {
 			this.addr=addr;
@@ -737,6 +736,17 @@ public class HydarEE{
 		public String getRequestURI(){
 			return path.split("\\?",2)[0];
 		}
+		public StringBuffer getRequestURL(){
+			String host=headers.get(":authority");
+			if(host==null)
+				host=headers.get("host");
+			String scheme=headers.get(":scheme");
+			String uri=getRequestURI();
+			int len=8+host.length()+uri.length();
+			return new StringBuffer(len)
+					.append(scheme).append("://")
+					.append(host).append(uri);
+		}
 		public String getRemoteAddr() {
 			return addr.getAddress().getHostAddress();
 		}
@@ -748,6 +758,12 @@ public class HydarEE{
 		}
 		public InputStream getInputStream(){
 			return new BAIS(body,0,bodyLength);
+		}
+		public int getContentLength(){
+			return bodyLength;
+		}
+		public long getContentLengthLong(){
+			return bodyLength;
 		}
 		public Reader getReader(){
 			return new InputStreamReader(getInputStream(),UTF_8);
@@ -780,7 +796,7 @@ public class HydarEE{
 			onReset=s;
 		}
 		private void setDefaults() {
-			sc=builder.getHeader(":status")==null?200:Integer.parseInt(builder.getHeader(":status"));
+			sc=builder.getStatus()==null?200:Integer.parseInt(builder.getStatus());
 			setHeader("Content-Type",contentType);
 			setHeader("Expires","Thu, 01 Dec 1999 16:00:00 GMT");
 			String cc=builder.hydar.config.CACHE_CONTROL_JSP;
