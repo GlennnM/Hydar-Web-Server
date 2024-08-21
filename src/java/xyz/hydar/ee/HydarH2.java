@@ -4,12 +4,12 @@ import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.util.Optional;
 import java.net.SocketTimeoutException;
 import java.net.http.HttpTimeoutException;
 import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Lock;
 import java.util.stream.IntStream;
@@ -18,7 +18,7 @@ import java.util.stream.IntStream;
  * Requires an associated ServerThread(for now)
  * */
 public class HydarH2{
-	/**TODO: unimplemented: local window(maybe configurable)/priorities*/
+	/**TODO: unimplemented: priorities*/
 	/**TODO: server push - load deps based on rates, store in cookie(2 b64/etag?)*/
 	public static final byte[] MAGIC="PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".getBytes(ISO_8859_1);
 	public final ServerThread thread;
@@ -44,6 +44,7 @@ public class HydarH2{
 	public volatile int localWindow;
 	//longadder might be better but this saves memory
 	public final AtomicInteger remoteWindow = new AtomicInteger(remoteSettings[Setting.SETTINGS_INITIAL_WINDOW_SIZE]);
+	public final AtomicInteger senders=new AtomicInteger();//used for upload buffer limiting
 	volatile ByteBuffer input=ByteBuffer.allocate(0);
 	volatile ByteBuffer output=ByteBuffer.allocate(32);
 	public static final Frame SETTINGS_ACK=Frame.of(Frame.SETTINGS).ackFlag();
@@ -76,9 +77,11 @@ public class HydarH2{
 	ByteBuffer input(int length) {
 		return (length>input.capacity())?(input=ByteBuffer.allocate(length)):input;
 	}
-
 	public void goaway(int error, String info){
-		streams.values().forEach(x->x.state=HStream.State.closed);
+		for(HStream stream:streams.values()) {
+			if(stream!=null)
+				stream.state=HStream.State.closed;
+		}
 		streams.clear();
 		System.out.println("go away "+error+" "+info+" ");
 		//new RuntimeException().fillInStackTrace().printStackTrace();
@@ -109,7 +112,7 @@ public class HydarH2{
 			.limiter(thread.limiter)
 			.withData(baos.array(),0,baos.limit())
 			.writeToH2(this, false);
-			
+		Frame.of(Frame.WINDOW_UPDATE).withData(HStream.WINDOW_INC).writeToH2(this,false);
 	}
 	public void read() throws IOException{
 		try {
@@ -152,6 +155,7 @@ class HStream{
 	public State state;
 	public final HydarH2 h2;
 	public final int number;
+	private Map<String,String> heads=null;
 	public int blockType;
 	public int padLength;
 	//
@@ -168,6 +172,8 @@ class HStream{
 	};
 	private BAOS block=EMPTY_BAOS;
 	private BAOS dataBlock=EMPTY_BAOS;
+	private int dataBlockCount=0;
+	public static final byte[] WINDOW_INC = ByteBuffer.allocate(4).putInt(Config.H2_LOCAL_WINDOW_INC).array();
 	private static final byte[][] CLOSE_REASONS=IntStream.range(0,20)
 		.mapToObj(x->ByteBuffer.allocate(4).putInt(x).array())
 		.toArray(byte[][]::new);
@@ -188,27 +194,38 @@ class HStream{
 		
 		this.number=number;
 	}
-	public void close(int reason) throws IOException{
+	public boolean cleanup() {
+		boolean first=h2.streams.remove(this.number)!=null;
 		state=State.closed;
-		if(reason<0)return;
-		h2.streams.remove(this.number);
+		if(first&&dataBlock.size()>0) {
+			h2.senders.decrementAndGet();
+		}
+		return first;
+	}
+	public void close(int reason) throws IOException{
+		if(cleanup() && reason>=0)
 			Frame.of(Frame.RST_STREAM, this)
 				.withData(CLOSE_REASONS[reason])
 				.writeToH2(h2, true);
 	}
+	//check if request on this stream is HEAD, default to prev
+	public boolean isHead(boolean prev) {
+		return heads!=null?"HEAD".equals(heads.get(":method")):prev;
+	}
 	//wait for window to allow sending
 	public int controlFlow(){
-		long time=0,timer=Config.H2_WINDOW_TIMER,max=Config.H2_WINDOW_TIMER;
+		long time=0,timer=Config.H2_REMOTE_WINDOW_TIMER,max=Config.H2_REMOTE_WINDOW_TIMER;
 		while(canSend()&&time<max){
 			
 			//System.out.println(""+time+":"+remoteWindow+":"+h2.remoteWindow);
 			int local=remoteWindow.get();
 			int global=h2.remoteWindow.get();
+			//System.out.println("l"+local+" g"+global);
 			if(local>0&&global>0)
 				return Math.min(local,global);
 			try {
 				Thread.sleep(time==0?50:timer);
-				time+=timer;
+				time+=time==0?50:timer;
 			} catch (InterruptedException ee) {
 				Thread.currentThread().interrupt();
 			}
@@ -219,9 +236,15 @@ class HStream{
 		return block==EMPTY_BAOS?(block=new BAOS(256)):block;
 	}
 	private BAOS dataBlock() {
-		return dataBlock==EMPTY_BAOS?(dataBlock=new BAOS(256)):dataBlock;
+		if(dataBlock==EMPTY_BAOS) {
+			h2.senders.incrementAndGet();
+			dataBlock=new BAOS(256);
+		}
+		return dataBlock;
 	}
-
+	public int dataBlockSize() {
+		return dataBlock.size();
+	}
 	/**
 	 * An endpoint MUST NOT send frames other than PRIORITY on a closed stream. An
 	 * endpoint that receives any frame other than PRIORITY after receiving a
@@ -243,6 +266,17 @@ class HStream{
 			default -> false;
 		};
 	}
+	private void parseHeaders() {
+		if(heads!=null)throw new IllegalStateException("Already parsed headers");
+		heads = new HashMap<>(16);
+		//long t1 = new Date().getTime();
+		try(var byte_dis = block().toInputStream()){
+			h2.decompressor.readFields(byte_dis,heads);
+		}catch(IOException e){
+			h2.goaway(9,"Decompressing failed");
+			return;
+		}
+	}
 	public void recv(Frame frame, ByteBuffer dis, InputStream more) throws IOException{
 		
 		switch(frame.type){
@@ -252,6 +286,7 @@ class HStream{
 					break;
 				}
 				blockType=Frame.HEADERS;
+				
 				if(canReceive()){
 					h2.minStream=this.number;
 					this.state=State.open;
@@ -269,6 +304,7 @@ class HStream{
 						blockType=Frame.DATA;
 						more.skip(padLength);
 						padLength=0;
+						parseHeaders();
 					}else{
 						h2.expects=Frame.CONTINUATION;
 					}
@@ -291,6 +327,31 @@ class HStream{
 					}
 					localWindow-=frame.length;
 					h2.localWindow-=frame.length;
+					if(localWindow<=0) {
+						if(Config.H2_LOCAL_WINDOW_TIMER>0) {
+							try {
+								Thread.sleep(Config.H2_LOCAL_WINDOW_TIMER*Hydar.threadCount.get());
+							} catch (InterruptedException e) {}
+						}
+						localWindow += Config.H2_LOCAL_WINDOW_INC;
+						Frame.of(Frame.WINDOW_UPDATE,this).withData(WINDOW_INC).writeToH2(h2,false);
+					}
+					if(h2.localWindow<=0) {
+						if(Config.H2_LOCAL_WINDOW_TIMER>0) {
+							try {
+								Thread.sleep(Config.H2_LOCAL_WINDOW_TIMER*Hydar.threadCount.get());
+							} catch (InterruptedException e) {}
+						}
+						h2.localWindow += Config.H2_LOCAL_WINDOW_INC;
+						Frame.of(Frame.WINDOW_UPDATE).withData(WINDOW_INC).writeToH2(h2,false);
+					}
+					//skip length calculation if limiter disabled, and only every 100 frames
+					if((++dataBlockCount%100==0)&&h2.thread.limiter!=null && !(h2.thread.limiter.checkBuffer(Integer.MAX_VALUE))) {
+						if(!h2.thread.limiter.checkBuffer(dataBlock.size() * h2.senders.get())) {
+							close(0xb);//ENHANCE_YOUR_CALM
+							return;
+						}
+					}
 					dataBlock().write(dis.array(), dis.position(), frame.length);
 					if(frame.endStream){
 						more.skip(padLength);
@@ -312,6 +373,7 @@ class HStream{
 				break;
 			case Frame.WINDOW_UPDATE:
 				int inc=(dis.getInt()&0x7fffffff);
+				//System.out.println("Stream "+number+" +"+inc);
 				if(inc==0){
 					h2.goaway(1,"0 window increment");
 				}else{
@@ -326,6 +388,7 @@ class HStream{
 						blockType=Frame.DATA;
 						more.skip(padLength);
 						padLength=0;
+						parseHeaders();
 					}
 				}else{
 					//Protocol error
@@ -336,18 +399,17 @@ class HStream{
 				//dis.skip(frame.length);
 				return;
 		}
-		
+
 		if(frame.endStream){
-			blockType=-1;
-			h2.expects=-1; 
-			Map<String,String> heads = new HashMap<>(16);
-			//long t1 = new Date().getTime();
-			try(var byte_dis = block().toInputStream()){
-				h2.decompressor.readFields(byte_dis,heads);
-			}catch(IOException e){
-				h2.goaway(9,"Decompressing failed");
+			if(!canReceive())return;
+			if(state==State.half_closed_local) {
+				this.close(0);
 				return;
 			}
+			state=State.half_closed_remote;
+			blockType=-1;
+			h2.expects=-1; 
+			
 			//System.out.println("read headers took "+(new Date().getTime()-t1)+" ms");
 				//System.out.println(heads);
 				//System.out.println("\""+heads.get(":path")+"\" "+heads.get(":path").length());
@@ -366,20 +428,28 @@ class HStream{
 				}catch(IOException e){
 					
 				}finally {
+					//h2.streams.remove(number);
 					block = dataBlock = EMPTY_BAOS;
 					limiter.release(Token.PERMANENT_STATE, Config.TC_PERMANENT_H2_STREAM);
 					h2.maxStream=Math.max(this.number,h2.maxStream);
+					this.padLength=0;
+					try {
+						//System.out.println(this.state);
+						if(this.state!=State.open){
+							this.close(0);
+						}else this.state=State.half_closed_local;
+					}catch(IOException e) {
+						this.cleanup();
+					}
 				}
 			};
-			if(limiter.acquire(Token.PERMANENT_STATE, Config.TC_PERMANENT_H2_STREAM) && concurrent)
+			if(limiter.acquire(Token.PERMANENT_STATE, Config.TC_PERMANENT_H2_STREAM) && concurrent) {
+				//System.out.println("concurrent "+h2.streams.size()+concurrent);
 				HydarUtil.TFAC.newThread(streamTask).start();
-			else {
+			}else {
+				//System.out.println("nonconcurrent "+h2.streams.size()+concurrent);
 				streamTask.run();
 			}
-			this.padLength=0;
-			if(this.state!=State.open){
-				this.close(0);
-			}else this.state=State.half_closed_remote;
 		}
 	}
 	//
@@ -425,6 +495,7 @@ class Frame{
 	private Optional<Limiter> limiter=Optional.empty();
 	private Optional<ByteBuffer> streamBuffer=Optional.empty();
 	private volatile Optional<Lock> lock=Optional.empty();
+	private final int MAX_DATA_FRAME_SPLITS=8;
 	//error codes
 	public Frame(byte type){
 		this.type=type;
@@ -557,20 +628,47 @@ class Frame{
 				.putInt(streamNum()&0x7ffffff);
 	}
 	public void writeTo(OutputStream o, boolean flush) throws IOException{
-		int length=this.length;//protect lock
+		writeTo(o,flush,0);
+	}
+	private void writeTo(OutputStream o, boolean flush, int splits) throws IOException{
+		Frame part2=null;
+		int neededWindow=splits<MAX_DATA_FRAME_SPLITS?1:length;
 		if(stream!=null && type==Frame.DATA) {
-			int attempts=1, windowLeft=stream.controlFlow();
-			while(windowLeft<length&&stream.canSend()){
+			int attempts=Config.H2_WINDOW_ATTEMPTS, windowLeft=stream.controlFlow();
+			while(windowLeft<neededWindow&&stream.canSend()){
 				attempts--;
-				if(windowLeft<0||attempts<0) {
-					if(stream.canSend())
+				//System.out.println("ATTEMPT "+attempts);
+				if(attempts<0) {
+					//kill h2 if no global window, kill stream if no stream window
+					if(stream.remoteWindow.get()>=neededWindow && stream.canSend())
 						stream.h2.goaway(0,"Flow control timeout");
+					else stream.close(5);
 					return;
 				}
 				windowLeft=stream.controlFlow();
 				//System.out.println("%%%%%%LEFT%%%%%%%%"+windowLeft);
 			}
+			//we have some window available but not the full length - split the frame
+			//this way client will notice 0 window and request more
+			if(splits<MAX_DATA_FRAME_SPLITS && stream.canSend() && windowLeft>0 && windowLeft<this.length) {
+				int oldLength = length;
+				length = windowLeft;
+				endStream=false;
+				if(dataStream!=null) {
+					part2=Frame.of(Frame.DATA,stream)
+							.endStream(endStream)
+							.withData(dataStream,oldLength-length,streamBuffer.orElse(null));
+					
+				}else {
+					part2 = Frame.of(Frame.DATA,stream)
+						.endStream(endStream)
+						.withData(data,offset+length,oldLength-length);
+				}
+			}
 		}
+		if(stream!=null && !stream.canSend())
+			return;
+		int length=this.length;//protect lock
 		lock.ifPresent(Lock::lock);
 		try {
 			//TODO: the copying didn't seem to lower the amount of tls fragmentation so try removing it again?
@@ -596,6 +694,9 @@ class Frame{
 			o.write(buf.array(),0,9+length);
 			if(flush)
 				o.flush();
+			if(part2!=null) {
+				part2.writeTo(o,flush,splits+1);
+			}
 		}finally {
 			lock.ifPresent(Lock::unlock);
 		}
@@ -737,6 +838,7 @@ class Frame{
 					if(inc==0){
 						h2.goaway(1,"0 window increment");
 					}else{
+						//System.out.println("g "+inc);
 						h2.remoteWindow.addAndGet(inc);
 						//h2.streams.values().forEach(s->s.remoteWindow+=inc);
 					}
