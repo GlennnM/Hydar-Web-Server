@@ -25,7 +25,7 @@
 					<archive>
 						<manifest>
 							<addClasspath>true</addClasspath>
-							<mainClass>xyz.hydar.Hydar</mainClass>
+							<mainClass>xyz.hydar.ee.Hydar</mainClass>
 						</manifest>
 					</archive>
 				</configuration>
@@ -34,7 +34,7 @@
 				<artifactId>maven-compiler-plugin</artifactId>
 				<version>3.8.1</version>
 				<configuration>
-					<release>17</release>
+					<release>21</release>
 				</configuration>
 			</plugin>
 		</plugins>
