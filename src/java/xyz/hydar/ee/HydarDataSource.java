@@ -247,9 +247,14 @@ public abstract class HydarDataSource implements DataSource, AutoCloseable{
 		//} catch (IOException e1) {}
 		lock.lock();
 		try {
-			while(pool.size()>0) {
+			long remainingMillis=maxWaitMillis;
+			long startTime=System.currentTimeMillis();
+			boolean overflow;
+			while(overflow=pool.size()+actives.size()>=maxTotal) {
+				if(remainingMillis<=0)break;
 				try {
-					PooledConn pc = pool.poll(maxWaitMillis,TimeUnit.MILLISECONDS);
+					PooledConn pc = pool.poll(remainingMillis,TimeUnit.MILLISECONDS);
+					remainingMillis = maxWaitMillis -  (System.currentTimeMillis()-startTime);
 					if(pc==null)
 						break;
 					activateChecked(pc);
@@ -265,7 +270,7 @@ public abstract class HydarDataSource implements DataSource, AutoCloseable{
 					continue;
 				}
 			}
-			if(actives.size()>=maxTotal) {
+			if(overflow) {
 				throw new SQLException("No connections available");
 				//return new PooledConn(login, username, password, true).getConnection();
 			}return newConn(login, username, password);
@@ -708,7 +713,7 @@ public abstract class HydarDataSource implements DataSource, AutoCloseable{
 			@Override
 			protected PooledConnection newPC(boolean login, String username, String password) throws SQLException {
 				if(ds instanceof DataSource pds)
-					return HydarDataSource.physicalHandle(!login?pds.getConnection():pds.getConnection(username, password));
+					return HydarDataSource.physicalHandle(!login?pds.getConnection(this.username,this.password):pds.getConnection(username, password));
 				else throw new SQLException("invalid");
 			}
 		}
@@ -720,7 +725,7 @@ public abstract class HydarDataSource implements DataSource, AutoCloseable{
 			@Override
 			protected PooledConnection newPC(boolean login, String username, String password) throws SQLException {
 				if(ds instanceof ConnectionPoolDataSource pds)
-					return !login?pds.getPooledConnection():pds.getPooledConnection(username, password);
+					return !login?pds.getPooledConnection(this.username,this.password):pds.getPooledConnection(username, password);
 				else throw new SQLException("invalid");
 			}
 		}
