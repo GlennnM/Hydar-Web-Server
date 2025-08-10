@@ -424,8 +424,7 @@ public class HydarEE{
 				  String line1=diagnostic.getKind()+": "+diagnostic.getCode();
 				  String sLine=fullSource.substring(startPos,endPos).trim();
 				  String src=diagnostic.getSource()==null?"":
-						  
-						  "hydar:/"+((JavaFileObject)(diagnostic.getSource())).getName()+ignoredWarnings;
+						  "hydar:/" + diagnostic.getSource().getName() + ignoredWarnings;
 				 // int maxLen=Math.max(Math.max(Math.max(sLine.length(),line1.length()),line0.length()),src.length());
 				  int maxLen=Stream.of(sLine,line1,line0,src)
 						  .mapToInt(String::length)
@@ -448,11 +447,17 @@ public class HydarEE{
 					if(success){
 						//load class and update hash table
 						Class<?> c= ucl.loadClass(q);
-						JspServlet servlet=(JspServlet)c.getConstructor().newInstance();
+						JspServlet servlet;
+						try {
+							servlet = (JspServlet)c.getConstructor().newInstance();
+						}catch(ExceptionInInitializerError eie) {
+							throw new RuntimeException(eie.getCause());
+						}
 						servlet.doesSessions=doesSessions;
 						servlets.put(n,servlet);
 						return diagList.size();
 					}else{
+						servlets.put(n, new ErrorServlet(p));
 						double r = ThreadLocalRandom.current().nextDouble();
 						if(r<0.25)
 							System.err.println(e+": Compilation failed. You are fat");
@@ -515,7 +520,7 @@ public class HydarEE{
 		var resp=response;
 		resp.request=request;
 		JspServlet meth = (JspServlet)servlets.get(name);
-		if(meth instanceof EmptyServlet lazy) {
+		if(!(meth instanceof ErrorServlet) && meth instanceof EmptyServlet lazy) {
 			synchronized(meth) {
 				compile(lazy.getPath());
 				meth=(JspServlet)servlets.get(name);
@@ -579,13 +584,25 @@ public class HydarEE{
 		}
 		
 	}
+	/**Holds a place for a jspservlet that has failed to compile.*/
+	public static class ErrorServlet extends EmptyServlet{
+		public ErrorServlet(Path sourcePath) {
+			super(sourcePath);
+		}
+		@Override
+		public void _jspService(HydarEE.HttpServletRequest request, HydarEE.HttpServletResponse response) {
+			response.sendError(500);
+			response.getWriter().print(request.getServletContext().hydar.config.getErrorPage("500"));
+		}
+		
+	}
 	/**Superinterface of jspservlet, and possibly loadable with the SPI*/
 	public static interface HttpServlet{
 		public String RESOURCE_LOCATION();
 		public void service(HttpServletRequest request, HttpServletResponse response) throws IOException;
 		
 	}
-	/**A singular JSP page.*/
+	/**A singular JSP page. TODO: interface?*/
 	public static abstract class JspServlet implements HttpServlet{
 		boolean doesSessions=true;
 		@Override

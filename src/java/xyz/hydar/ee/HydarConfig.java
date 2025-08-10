@@ -95,7 +95,6 @@ class Config{
 	public String CACHE_CONTROL_JSP="no-cache";
 	public String CACHE_CONTROL_NO_JSP="public, max-age=604800, must-revalidate";
 
-	public static boolean TC_ENABLED=false;
 	public Map<Pattern,String> links = new LinkedHashMap<>();
 	public Map<Pattern,List<String>> linkParams = new LinkedHashMap<>();
 	
@@ -103,7 +102,8 @@ class Config{
 	public static String H2_HPACK_TREE_STRATEGY="ARRAY";
 	public static String H2_HPACK_TABLE_STRATEGY="MAP";
 	public int WS_LIFETIME=15000;
-	
+
+	public static boolean TC_ENABLED=false;
 	public static int TC_FAST_HTTP_REQUEST=50;
 	public static int TC_FAST_WS_MESSAGE=100;
 	public static int TC_FAST_H2_FRAME=5;
@@ -113,12 +113,12 @@ class Config{
 	public static int TC_SLOW_JSP_INVOKE=100;
 	public static Set<String> alreadySet = new HashSet<>();
 	public String configPath = "";
-	public String TC_PERMANENT_STATE, TC_IN, TC_OUT, TC_SLOW_API, TC_FAST_API;
+	public static String TC_PERMANENT_STATE, TC_IN, TC_OUT, TC_SLOW_API, TC_FAST_API;
 	
 	public String WEB_ROOT = ".";
 	public boolean LAZY_COMPILE=true;
 	public boolean LAZY_FILES=true;
-	public boolean TRY_UNSAFE_WATCH_SERVICE=true;
+	public boolean TRY_UNSAFE_WATCH_SERVICE=false;
 	public Map<String,String> errorPages=new HashMap<>();
 	private static final Map<String,Object> jndi = new ConcurrentHashMap<>();
 	public final Hydar hydar;
@@ -403,9 +403,12 @@ class Config{
 						} catch (Exception e) {}
 						Pattern HOST_p=null;
 						if(HOST!=null)
-							HOST_p=Pattern.compile(Arrays.stream(v.split(","))
+							HOST_p=Pattern.compile(
+									"^("+
+									Arrays.stream(v.split(","))
 									.map(x->"("+x.trim().replace(".","\\.").replace("*",".*")+")")
-									.collect(Collectors.joining("||")));
+									.collect(Collectors.joining("|"))
+									+")$");
 						HOST=Optional.ofNullable(HOST_p).filter(p->!p.toString().trim().equals("(.*)"));
 					return;
 				}
@@ -433,7 +436,7 @@ class Config{
 				System.out.println("Unknown setting: "+k);
 			}
 		});
-
+		
 		Token.PERMANENT_STATE.setTasks(tasks(TC_PERMANENT_STATE));
 		Token.SLOW_API.setTasks(tasks(TC_SLOW_API));
 		Token.FAST_API.setTasks(tasks(TC_FAST_API));
