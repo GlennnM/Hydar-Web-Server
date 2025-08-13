@@ -105,7 +105,7 @@ class ServerThread implements Runnable {
 	private boolean h1use=false;
 	private boolean willClose=false;//Connection: close header
 	private volatile boolean isHead=false;//INCOMING hstream
-	public final ThreadLocal<Hydar> hydar = new ThreadLocal<>();//TODO: scoped value?
+	public static final ThreadLocal<Hydar> hydar = new ThreadLocal<>();//TODO: scoped value?
 	public volatile HydarEE.HttpSession session = null; //Session obtained from cookies or URL.
 	/**
 	 * Create a new ServerThread based on a given client Socket
@@ -297,14 +297,14 @@ class ServerThread implements Runnable {
 	 * Returns a request-specific Hydar. 
 	 * The Hydar may be different for each HStream.
 	 * */
-	public Hydar hydar() {
+	public static Hydar hydar() {
 		return hydar.get();
 	}
 	/** 
 	 * Returns a request-specific Config. 
 	 * The Config may be different for each HStream.
 	 * */
-	public Config config() {
+	public static Config config() {
 		Hydar h = hydar.get();
 		return h!=null ? h.config : Hydar.hydars.get(0).config;
 	}
@@ -343,7 +343,7 @@ class ServerThread implements Runnable {
 			sendError(matchingHost.isEmpty()?"400":"404",hstream);
 			return;
 		}else {
-			this.hydar.set(matchingHydar.orElseThrow());
+			hydar.set(matchingHydar.orElseThrow());
 		}
 		
 		String path=path_.substring(hydar().config.SERVLET_PATH.length());
@@ -1069,7 +1069,7 @@ public class Hydar {
 						public void hparse(Map<String,String> headers, Optional<HStream> hstream, byte[] body, int bodyLength) throws IOException {
 							String path = headers.get(":path");
 							String host = hstream.isPresent() ? headers.get(":authority") : headers.get("host");
-							this.hydar.set(hydars.get(0));
+							hydar.set(hydars.get(0));
 							if(host==null) {
 								sendError("400",hstream);
 								close();
