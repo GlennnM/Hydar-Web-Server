@@ -63,11 +63,12 @@ public class HydarWS extends OutputStream{
 	public HydarWS(ServerThread thread, Optional<HStream> hs, String path,String search,boolean deflate) throws IOException{
 		
 		this.thread=thread;
-		thread.client.setSoTimeout(ServerThread.config().WS_LIFETIME);
 		this.path=path;
 		this.search=search;
 		this.deflate=deflate;
 		this.hydar = ServerThread.hydar();
+		if(hs.isEmpty() || ServerThread.config().WS_LIFETIME > thread.client.getSoTimeout())
+			thread.client.setSoTimeout(ServerThread.config().WS_LIFETIME);
 		if(deflate) {
 			deflate_baos=new BAOS(256);
 			deflate_dos=new DeflaterOutputStream(deflate_baos,new Deflater(Deflater.DEFAULT_COMPRESSION, true),true);
@@ -145,13 +146,14 @@ public class HydarWS extends OutputStream{
 				};
 			//System.arraycopy(ub,0,w,off2,l2);
 			if(hs!=null) {
-				BAOS fullData = new BAOS(len+2);
-				fullData.write(header);
-				fullData.write(data, start, len);
+				ByteBuffer fullData = hs.h2.output(len+9+header.length)
+						.position(9)
+						.put(header)
+						.put(data, start, len);
 				var frame = Frame.of(Frame.DATA)
 						.limiter(hs.h2.thread.limiter)
 						.stream(hs)
-						.withData(fullData);
+						.withPaddedData(fullData, len+header.length);
 				//System.out.println("S%%%%"+len);
 				//System.out.println("F%%%%"+frame.length);
 				//System.out.println(new String(data,start,len));
@@ -193,10 +195,13 @@ public class HydarWS extends OutputStream{
 							.withData(WS_CLOSE)
 							.endStream();
 					frame.writeToH2(hs.h2, false);
-					hs.close(0);
 				}
 			} finally {
-				thread.close();
+				if(hs==null) {
+					thread.close();
+				}else {
+					hs.close(0);
+				}
 			}
 		}
 	}
@@ -211,24 +216,10 @@ public class HydarWS extends OutputStream{
 		}
 		return len;
 	}
-	/**
-	 * Unmask using bytebuffers. 
-	 * Simple loops usually get vectorized so this might not be necessary
-	 * */
 	static byte[] unmask(byte[] sb, byte[] pl, int off) {
-		var plb=ByteBuffer.wrap(pl);//output
-		var buf=ByteBuffer.wrap(sb);//input
-		var lbuf=plb.remaining()<8?empty:buf.slice(off+4,buf.limit()-(off+4)).asLongBuffer();
-		long mask=buf.getInt(off);
-		mask = (mask<<32) | (mask&0xffffffffl);
-		while(plb.remaining()>=8) {
-			plb.putLong(lbuf.get()^mask);
-		}
-		buf.position(off+4+lbuf.position()*8);
-		while(plb.hasRemaining()){
-			mask=Long.rotateLeft(mask,8);
-			plb.put((byte)(buf.get()^mask));
-		}
+		for(int i=0;i<pl.length;i++){
+			pl[i]=(byte)((sb[i+off+4])^(sb[off+(i%4)]));
+		} 
 		return pl;
 	}
 	public void readBuffer(ByteBuffer buf, int lenTotal) throws IOException{
@@ -341,13 +332,12 @@ public class HydarWS extends OutputStream{
 				close();
 				return;
 			}else if(op == 0x09){
-				//TODO: make this use buffers as well maybe
 				System.out.println("aaa i got pinged");
 				input[0]+=1;
 				for(int i=0;i<length;i++){
 					input[i+off+4]=(byte)((input[i+off+4])^(input[off+(i%4)]));
 				}
-				if(hs!=null) {
+				if(hs==null) {
 					thread.output.write(input,0,(int)length+off+4);
 					thread.output.flush();
 				}else {
