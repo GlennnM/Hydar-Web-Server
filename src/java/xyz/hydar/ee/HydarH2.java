@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.Lock;
@@ -26,7 +27,7 @@ public class HydarH2{
 	/**TODO: server push - load deps based on rates, store in cookie(2 b64/etag?)*/
 	public static final byte[] MAGIC="PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".getBytes(ISO_8859_1);
 	public final ServerThread thread;
-	public final Map<Integer,HStream> streams= new HashMap<>();
+	final ConcurrentHashMap<Integer,HStream> streams= new ConcurrentHashMap<>();
 	public final HydarHP compressor;
 	public final HydarHP decompressor;
 	//reuse since parsing is single threaded
@@ -82,18 +83,18 @@ public class HydarH2{
 		return (length>input.capacity())?(input=ByteBuffer.allocate(length)):input;
 	}
 	public void closeAllWS() {
-		for(HStream stream:streams.values().stream().toList()) {
+		streams.forEachValue(Long.MAX_VALUE, stream-> {
 			if(stream.ws != null)
 				try{stream.ws.close();}catch(IOException ioe){}
-		}
+		});
 	}
 	public void goaway(int error, String info){
 		//new RuntimeException().fillInStackTrace().printStackTrace();
 
-		for(HStream stream:streams.values()) {
+		streams.forEachValue(Long.MAX_VALUE, stream-> {
 			if(stream!=null)
 				stream.state=HStream.State.closed;
-		}
+		});
 		closeAllWS();//wont send since state closed cant send
 		streams.clear();
 		System.out.println("go away "+error+" "+info+" ");
