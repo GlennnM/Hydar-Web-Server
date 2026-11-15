@@ -1089,7 +1089,6 @@ public class HydarEE{
 	private class HydarFileManager extends ForwardingJavaFileManager<StandardJavaFileManager>{
 		private static Map<String,BAOS> classes=new ConcurrentHashMap<>();
 		private final StandardJavaFileManager standard;
-		
 		/**Construct a new HydarFileManager.*/
 		public HydarFileManager(StandardJavaFileManager s){
 			super(s);
@@ -1109,31 +1108,27 @@ public class HydarEE{
 		 * allowing them to be GC'd
 		 * 2. delegates to the default class loader if not found.
 		 */
+		
 		@Override
 		public URLClassLoader getClassLoader(JavaFileManager.Location location){
 			return new URLClassLoader(new URL[0],HydarEE.class.getClassLoader()){
-				/**
-				 * Delegate to the standard file manager if a ClassNotFoundException
-				 * occurs.
-				 * */
-				@Override
-				public Class<?> loadClass(String className) throws ClassNotFoundException{
-					try {
-						return findClass(className);
-					}catch(ClassNotFoundException e) {
-						return super.loadClass(className);
-					}
-				}
+			    static {
+			        if (!registerAsParallelCapable()) 
+			            System.err.println("Could not register CL as parallel");
+			    }
 				/**
 				 * Deallocate and return a class loaded from a byte array stored previously
 				 * or delegate to the standard file manager.
 				 * */
 				@Override
 				protected Class<?> findClass(String className) throws ClassNotFoundException{
-					var ret=classes.remove(className);
-					if(ret==null) 
-						return super.findClass(className);
-					return defineClass(className,ret.buf(),0,ret.size());
+					synchronized (getClassLoadingLock(className)){
+						var data = classes.get(className);
+						if(data==null)
+								throw new ClassNotFoundException();
+						else
+							return defineClass(className,data.buf(),0,data.size());
+					}
 				} 
 			};
 		}
